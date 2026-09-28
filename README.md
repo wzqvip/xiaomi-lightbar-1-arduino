@@ -2,7 +2,7 @@
 
 用一块 **RF-Nano**（板载 nRF24L01+ 的 Arduino Nano）控制 **小米显示器挂灯 MJGJD01YL**。
 
-这是 [wzqvip/xiaomi-lightbar-1-arduino](https://github.com/wzqvip/xiaomi-lightbar-1-arduino)
+这是 [benallen-dev/xiaomi-lightbar-1-arduino](https://github.com/benallen-dev/xiaomi-lightbar)
 的 fork。原来的版本只是「把原作者自己遥控器抓到的 5 个报文硬编码回放」，换一台灯就
 不可能工作。这里改成了按照 [lamperez 的逆向工程](https://github.com/lamperez/xiaomi-lightbar-nrf24)
 **在单片机上实时构造合法报文**（含 CRC16），所以可以控制任意一台 MJGJD01YL。
