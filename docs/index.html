@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小米显示器挂灯控制器</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --card: #1d2026;
+    --line: #2c313a;
+    --fg: #e6e9ef;
+    --dim: #9aa3b2;
+    --accent: #4f8cff;
+    --ok: #37c07a;
+    --warn: #e8a33d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    flex-wrap: wrap; margin-bottom: 18px;
+  }
+  h1 { font-size: 19px; margin: 0; flex: 1; font-weight: 600; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 14px; margin: 0 0 12px; color: var(--dim); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  button {
+    background: #262b33; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 9px; padding: 10px 14px; font-size: 14px;
+    cursor: pointer; font-family: inherit; transition: background .12s;
+  }
+  button:hover:not(:disabled) { background: #313742; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #3d7cf0; }
+  button.big { width: 100%; padding: 22px; font-size: 17px; font-weight: 600; margin-bottom: 10px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row > button { flex: 1; }
+  input[type=text], input[type=number], select {
+    background: #14161a; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 11px; font-size: 14px; font-family: inherit;
+  }
+  input[type=range] { width: 100%; accent-color: var(--accent); margin: 6px 0 12px; }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--dim); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #555b66; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.busy { background: var(--warn); }
+  #preview {
+    height: 84px; border-radius: 10px; border: 1px solid var(--line);
+    transition: background .25s, box-shadow .25s;
+  }
+  .lbl { display: flex; justify-content: space-between; font-size: 13px; color: var(--dim); }
+  pre#log {
+    background: #0e1013; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; height: 190px; overflow-y: auto; margin: 0;
+    font: 12px/1.45 ui-monospace, Consolas, monospace;
+    color: #b9c2d0; white-space: pre-wrap; word-break: break-all;
+  }
+  pre#log .tx { color: var(--accent); }
+  pre#log .ok { color: var(--ok); }
+  pre#log .er { color: #ff6b6b; }
+  details.card summary { cursor: pointer; font-size: 14px; color: var(--dim); font-weight: 600; }
+  details.card[open] summary { margin-bottom: 14px; }
+  .field { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .field label { min-width: 96px; font-size: 13px; color: var(--dim); }
+  .hint { font-size: 12.5px; color: var(--dim); margin-top: 10px; }
+  .banner {
+    background: #3a2a12; border: 1px solid #6b4d1d; color: #ffd591;
+    padding: 12px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13.5px;
+  }
+  code { background: #0e1013; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>小米显示器挂灯控制器 <span style="color:var(--dim);font-weight:400">MJGJD01YL</span></h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">未连接</span></div>
+    <button id="connectBtn" class="primary">连接</button>
+  </header>
+
+  <div class="banner" id="unsupported" hidden></div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>电源</h2>
+      <button id="toggleBtn" class="big" disabled>开 / 关</button>
+      <button id="resetBtn" style="width:100%" disabled>复位（中等亮度 + 暖色）</button>
+    </section>
+
+    <section class="card">
+      <h2>效果预览</h2>
+      <div id="preview"></div>
+      <div class="hint">仅为滑块的示意，不代表灯条真实状态。</div>
+    </section>
+
+    <section class="card">
+      <h2>亮度</h2>
+      <div class="lbl"><span>暗</span><span id="brightVal">–</span><span>亮</span></div>
+      <input type="range" id="bright" min="0" max="15" value="8" disabled>
+      <div class="row">
+        <button id="upBtn" disabled>调亮</button>
+        <button id="downBtn" disabled>调暗</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>色温</h2>
+      <div class="lbl"><span>暖</span><span id="tempVal">–</span><span>冷</span></div>
+      <input type="range" id="temp" min="0" max="15" value="8" disabled>
+      <div class="row">
+        <button id="coolBtn" disabled>变冷</button>
+        <button id="warmBtn" disabled>变暖</button>
+      </div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>遥控器 ID 与配对</h2>
+    <div class="field">
+      <label for="remoteId">Remote ID</label>
+      <input type="text" id="remoteId" value="01B960" maxlength="6" size="8" spellcheck="false">
+      <button id="applyIdBtn" disabled>应用</button>
+      <button id="scanBtn" disabled>扫描遥控器</button>
+      <input type="number" id="scanSecs" value="30" min="5" max="300" style="width:80px">
+      <span class="hint" style="margin:0">秒</span>
+    </div>
+    <div class="hint">
+      没有遥控器？点「配对」然后给灯条断电重上电，灯条闪一下即配对成功。
+      <button id="pairBtn" disabled style="margin-left:8px;padding:5px 12px">配对</button>
+    </div>
+  </section>
+
+  <details class="card">
+    <summary>高级设置</summary>
+    <div class="field">
+      <label for="pa">发射功率</label>
+      <select id="pa" disabled>
+        <option value="3" selected>MAX（默认，最稳）</option>
+        <option value="2">HIGH</option>
+        <option value="1">LOW</option>
+        <option value="0">MIN</option>
+      </select>
+      <button id="applyRadioBtn" disabled>应用</button>
+    </div>
+    <div class="field">
+      <label for="repeats">重复次数</label>
+      <input type="number" id="repeats" value="20" min="1" max="255" style="width:90px">
+      <label style="min-width:auto">四信道广播</label>
+      <input type="checkbox" id="allChannels" checked>
+    </div>
+    <div class="field">
+      <label for="rawCmd">原始命令码</label>
+      <input type="text" id="rawCmd" placeholder="例如 0405" maxlength="4" size="8" spellcheck="false">
+      <button id="rawBtn" disabled>发送</button>
+    </div>
+    <div class="field">
+      <label>固件信息</label>
+      <button id="infoBtn" disabled>打印射频配置</button>
+    </div>
+  </details>
+
+  <section class="card">
+    <h2>日志 <button id="clearLog" style="float:right;padding:4px 10px;font-size:12px">清空</button></h2>
+    <pre id="log"></pre>
+  </section>
+
+</div>
+
+<script>
+"use strict";
+
+const BAUD = 115200;
+const READY = "READY";
+const $ = (id) => document.getElementById(id);
+
+let port = null, reader = null, writer = null;
+let lineBuf = "";
+let queue = Promise.resolve();
+let readyWaiters = [];
+let connected = false;
+let scanIds = new Map();
+
+// ---------------------------------------------------------------- logging
+
+function log(text, cls) {
+  const el = $("log");
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text + "\n";
+  el.appendChild(span);
+  while (el.childNodes.length > 500) el.removeChild(el.firstChild);
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(text, state) {
+  $("statusText").textContent = text;
+  $("dot").className = "dot" + (state ? " " + state : "");
+}
+
+// ---------------------------------------------------------------- serial
+
+async function connect() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: BAUD, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" });
+  } catch (e) {
+    if (e && e.name !== "NotFoundError") log("打开串口失败: " + e.message, "er");
+    return;
+  }
+
+  connected = true;
+  writer = port.writable.getWriter();
+  readLoop();
+
+  $("connectBtn").textContent = "断开";
+  setStatus("正在识别开发板…", "busy");
+  log("串口已打开 " + BAUD + " baud");
+
+  // Opening the port pulses DTR, which reboots the sketch. Give it time and
+  // then ping with an empty line until it answers.
+  await sleep(2200);
+  await queueCommand("", { quiet: true });
+  setStatus("已连接", "on");
+  log("开发板就绪", "ok");
+
+  $("remoteId").value = store("remoteId", "01B960");
+  await applyRadioSettings(true);
+  await queueCommand("i " + $("remoteId").value, { quiet: true });
+  setControlsEnabled(true);
+  updatePreview();
+}
+
+async function disconnect() {
+  connected = false;
+  setControlsEnabled(false);
+  try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch (e) {}
+  try { if (writer) writer.releaseLock(); } catch (e) {}
+  try { if (port) await port.close(); } catch (e) {}
+  reader = writer = port = null;
+  readyWaiters = [];
+  $("connectBtn").textContent = "连接";
+  setStatus("未连接", "");
+  log("已断开");
+}
+
+async function readLoop() {
+  const decoder = new TextDecoder();
+  reader = port.readable.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) onText(decoder.decode(value, { stream: true }));
+    }
+  } catch (e) {
+    if (connected) log("读取中断: " + e.message, "er");
+  }
+}
+
+function onText(text) {
+  lineBuf += text;
+  let i;
+  while ((i = lineBuf.indexOf("\n")) >= 0) {
+    const line = lineBuf.slice(0, i).replace(/\r$/, "");
+    lineBuf = lineBuf.slice(i + 1);
+    onLine(line);
+  }
+}
+
+const ID_RE = /CRC ok\s+id=([0-9A-Fa-f]{6})/;
+
+function onLine(line) {
+  if (line === READY) {
+    const w = readyWaiters.shift();
+    if (w) w();
+    return;
+  }
+  if (line.trim() === "") return;
+  log(line);
+  const m = ID_RE.exec(line);
+  if (m) {
+    const id = m[1].toUpperCase();
+    scanIds.set(id, (scanIds.get(id) || 0) + 1);
+    log(">> 发现遥控器 ID: " + id + "（已出现 " + scanIds.get(id) + " 次）", "ok");
+  }
+}
+
+// ---------------------------------------------------------------- commands
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function writeLine(cmd) {
+  return writer.write(new TextEncoder().encode(cmd + "\n"));
+}
+
+function waitReady(timeout) {
+  return new Promise((resolve, reject) => {
+    const waiter = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      const i = readyWaiters.indexOf(waiter);
+      if (i >= 0) readyWaiters.splice(i, 1);
+      reject(new Error("等待开发板响应超时"));
+    }, timeout);
+    readyWaiters.push(waiter);
+  });
+}
+
+/** Queue one command; the firmware answers READY when it has finished. */
+function queueCommand(cmd, opts) {
+  opts = opts || {};
+  queue = queue.then(async () => {
+    if (!connected || !writer) throw new Error("未连接");
+    if (cmd !== "" && !opts.quiet) log("> " + cmd, "tx");
+    setStatus("执行中…", "busy");
+    await writeLine(cmd);
+    await waitReady(opts.timeout || 15000);
+    setStatus("已连接", "on");
+  }).catch(async (e) => {
+    log("错误: " + e.message, "er");
+    // Recover: the firmware may simply be slower than we expected.
+    try { await sleep(300); await writeLine(""); await waitReady(3000); setStatus("已连接", "on"); }
+    catch (_) { setStatus("无响应", ""); }
+  });
+  return queue;
+}
+
+function store(key, fallback) {
+  try { return localStorage.getItem("lb." + key) || fallback; } catch (e) { return fallback; }
+}
+function save(key, value) {
+  try { localStorage.setItem("lb." + key, value); } catch (e) {}
+}
+
+async function applyRadioSettings(quiet) {
+  const pa = $("pa").value;
+  const repeats = Math.min(255, Math.max(1, parseInt($("repeats").value, 10) || 20));
+  const allCh = $("allChannels").checked ? 1 : 0;
+  save("pa", pa); save("repeats", repeats); save("allChannels", allCh);
+  await queueCommand("k " + pa, { quiet: true });
+  await queueCommand("n " + repeats, { quiet: true });
+  await queueCommand("a " + allCh, { quiet: true });
+  if (!quiet) log("射频设置已应用", "ok");
+}
+
+// ---------------------------------------------------------------- UI wiring
+
+function setControlsEnabled(on) {
+  ["toggleBtn", "resetBtn", "bright", "upBtn", "downBtn", "temp", "coolBtn", "warmBtn",
+   "applyIdBtn", "scanBtn", "pairBtn", "pa", "applyRadioBtn", "rawBtn", "infoBtn"]
+    .forEach((id) => { $(id).disabled = !on; });
+  if (!on) { $("brightVal").textContent = "–"; $("tempVal").textContent = "–"; }
+}
+
+function updatePreview() {
+  const b = parseInt($("bright").value, 10);
+  const t = parseInt($("temp").value, 10);
+  if ($("bright").disabled) { $("preview").style.background = "#0e1013"; return; }
+  $("brightVal").textContent = b;
+  $("tempVal").textContent = t;
+  // 2700K (warm) -> 6500K (cool)
+  const warm = [255, 176, 96], cool = [201, 226, 255];
+  const mix = (a, c, k) => Math.round(a + (c - a) * k);
+  const k = t / 15;
+  const rgb = [mix(warm[0], cool[0], k), mix(warm[1], cool[1], k), mix(warm[2], cool[2], k)];
+  const scale = 0.28 + 0.72 * (b / 15);
+  const col = rgb.map((v) => Math.round(v * scale));
+  $("preview").style.background = "rgb(" + col.join(",") + ")";
+  $("preview").style.boxShadow = "0 0 " + (6 + 26 * (b / 15)) + "px rgba(" + rgb.join(",") + ",.55)";
+}
+
+function bindUI() {
+  $("connectBtn").onclick = () => (connected ? disconnect() : connect());
+
+  $("toggleBtn").onclick = () => queueCommand("o");
+  $("resetBtn").onclick = () => { queueCommand("r"); setSliders(8, 0); };
+
+  $("upBtn").onclick = () => { bumpSlider("bright", +1); };
+  $("downBtn").onclick = () => { bumpSlider("bright", -1); };
+  $("coolBtn").onclick = () => { bumpSlider("temp", +1); };
+  $("warmBtn").onclick = () => { bumpSlider("temp", -1); };
+
+  $("bright").oninput = updatePreview;
+  $("temp").oninput = updatePreview;
+  $("bright").onchange = () => { updatePreview(); queueCommand("b " + $("bright").value, { timeout: 20000 }); };
+  $("temp").onchange = () => { updatePreview(); queueCommand("t " + $("temp").value, { timeout: 20000 }); };
+
+  $("applyIdBtn").onclick = () => {
+    const id = normalizeId($("remoteId").value);
+    if (!id) { log("Remote ID 必须是 6 位十六进制，例如 01B960", "er"); return; }
+    $("remoteId").value = id;
+    save("remoteId", id);
+    queueCommand("i " + id);
+  };
+
+  $("scanBtn").onclick = async () => {
+    const secs = Math.min(300, Math.max(5, parseInt($("scanSecs").value, 10) || 30));
+    scanIds.clear();
+    log("开始扫描 " + secs + " 秒，请转动遥控器旋钮……", "ok");
+    await queueCommand("s " + secs, { timeout: secs * 1000 + 20000 });
+    if (scanIds.size === 0) {
+      log("没有扫到有效报文。把板子贴近灯条再试，或用「配对」。", "er");
+    } else {
+      let best = null, n = -1;
+      scanIds.forEach((count, id) => { if (count > n) { n = count; best = id; } });
+      log("最可能的 Remote ID: " + best, "ok");
+      $("remoteId").value = best;
+    }
+  };
+
+  $("pairBtn").onclick = startPairing;
+
+  $("applyRadioBtn").onclick = () => applyRadioSettings(false);
+  $("rawBtn").onclick = () => {
+    const v = $("rawCmd").value.replace(/[^0-9a-fA-F]/g, "");
+    if (!v) return;
+    queueCommand("x " + v);
+  };
+  $("infoBtn").onclick = () => queueCommand("p", { timeout: 25000 });
+  $("clearLog").onclick = () => { $("log").textContent = ""; };
+}
+
+let pairing = false;
+
+async function startPairing() {
+  const id = normalizeId($("remoteId").value) || "01B960";
+  $("remoteId").value = id;
+  save("remoteId", id);
+  log("开始配对广播，ID = " + id, "ok");
+  log(">>> 现在把灯条断电，等 3 秒再插上 <<<", "tx");
+  log(">>> 配对成功的话灯条会闪一下，完成后按「停止配对」。<<<", "tx");
+  $("pairBtn").textContent = "停止配对";
+  $("pairBtn").onclick = stopPairing;
+  pairing = true;
+  await queueCommand("i " + id, { quiet: true });
+  pairLoop();
+}
+
+async function pairLoop() {
+  // Await each burst: enqueueing faster than the firmware drains would build
+  // up an endless backlog and make "stop" take ages to take effect.
+  while (pairing && connected) {
+    await queueCommand("r", { quiet: true, timeout: 20000 });
+    if (!pairing) break;
+    await sleep(300);
+  }
+}
+
+function stopPairing() {
+  pairing = false;
+  $("pairBtn").textContent = "配对";
+  $("pairBtn").onclick = startPairing;
+  log("配对广播已停止", "ok");
+}
+
+function bumpSlider(id, delta) {
+  const el = $(id);
+  const v = Math.min(15, Math.max(0, parseInt(el.value, 10) + delta));
+  if (v === parseInt(el.value, 10)) return;
+  el.value = v;
+  updatePreview();
+  queueCommand((id === "bright" ? "b " : "t ") + v, { timeout: 20000 });
+}
+
+function setSliders(brightness, temp) {
+  $("bright").value = brightness;
+  $("temp").value = temp;
+  updatePreview();
+}
+
+function normalizeId(v) {
+  const s = (v || "").trim().replace(/^0x/i, "").replace(/[^0-9a-fA-F]/g, "");
+  return s.length === 6 ? s.toUpperCase() : null;
+}
+
+// ---------------------------------------------------------------- start
+
+function init() {
+  if (!("serial" in navigator)) {
+    $("unsupported").hidden = false;
+    $("unsupported").innerHTML =
+      "这个浏览器不支持 Web Serial。请用 <b>Chrome / Edge / Opera</b> 桌面版打开，" +
+      "并且页面必须是 <b>HTTPS</b> 或 <b>http://localhost</b>。" +
+      "（Firefox 和 Safari 目前都不支持 Web Serial。）";
+    $("connectBtn").disabled = true;
+  }
+  $("remoteId").value = store("remoteId", "01B960");
+  $("pa").value = store("pa", "3");
+  $("repeats").value = store("repeats", "20");
+  $("allChannels").checked = store("allChannels", "1") === "1";
+  bindUI();
+  updatePreview();
+}
+
+init();
+</script>
+</body>
+</html>

@@ -1,234 +1,277 @@
-#include <RF24.h>
+#include <Arduino.h>
 #include <SPI.h>
-//#include <pinout.h>
+#include <RF24.h>
 
-// pinout.h isn't being resolved for some reason so just defining here.
-#define PIN_RADIO_CE 9
-#define PIN_RADIO_CSN 10
+#include "radio.h"
 
-#define SEND_ATTEMPTS 20
+// --- constants -------------------------------------------------------------
 
-const static uint8_t RADIO_ID = 0;
-const static uint8_t DESTINATION_RADIO_ID = 1;
+static const uint8_t LB_PREAMBLE[8] = {0x53, 0x39, 0x14, 0xDD, 0x1C, 0x49, 0x34, 0x12};
 
-RF24 radio(PIN_RADIO_CE, PIN_RADIO_CSN);
-const uint64_t address = 0xAAAAAAAAAAAA;
+// 0b0101... : extends the Telink sync sequence in front of the payload.
+static const uint8_t LB_TX_ADDR[5] = {0x55, 0x55, 0x55, 0x55, 0x55};
 
-uint8_t counter = 0;
+// First 5 bytes of the preamble, i.e. `preamble >> 24`. The bar's own
+// transmissions start with the sync sequence, so this is what we match on.
+static const uint8_t LB_RX_ADDR[5] = {0x53, 0x39, 0x14, 0xDD, 0x1C};
 
-void setupRadioScanner()
+// Channels the bar hops over (MHz - 2400).
+static const uint8_t LB_CHANNELS[4] = {6, 15, 43, 68};
+
+// --- module state ----------------------------------------------------------
+
+// One RF24 instance per known RF-Nano wiring; RF24 stores its pins at
+// construction time and cannot be re-pointed afterwards.
+static RF24 radioV1(10, 9);    // RF-Nano V1.0 / V2.0
+static RF24 radioV3(9, 10);    // classic nRF24 wiring / some clones
+static RF24 radioV3Alt(7, 8);  // RF-Nano V3.0
+
+static RF24 *radio = nullptr;
+static uint8_t activeCe = 0;
+static uint8_t activeCsn = 0;
+
+static uint8_t sRepeats = 20;
+static bool sAllChannels = true;
+static uint8_t sPaLevel = RF24_PA_MAX;
+
+// --- bring-up --------------------------------------------------------------
+
+bool radioProbe()
 {
-	radio.begin();
-	radio.openReadingPipe(0, address);
+	struct
+	{
+		RF24 *dev;
+		uint8_t ce;
+		uint8_t csn;
+		const char *label;
+	} candidates[] = {
+		{&radioV1, 10, 9, "RF-Nano V1/V2 (CE=D10, CSN=D9)"},
+		{&radioV3, 9, 10, "classic (CE=D9, CSN=D10)"},
+		{&radioV3Alt, 7, 8, "RF-Nano V3 (CE=D7, CSN=D8)"},
+	};
 
-	radio.setChannel(68);
-	radio.setDataRate(RF24_2MBPS);
-	radio.disableCRC();
-	radio.disableDynamicPayloads();
-	radio.setPayloadSize(17);
-	radio.setAutoAck(false);
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		RF24 *dev = candidates[i].dev;
 
-	radio.startListening();
-	radio.printPrettyDetails();
+		dev->begin();
+		if (!dev->isChipConnected())
+		{
+			continue;
+		}
+
+		// Extra confidence: write a register and read it back.
+		dev->setChannel(LB_CHANNEL);
+		if (dev->getChannel() != LB_CHANNEL)
+		{
+			continue;
+		}
+
+		radio = dev;
+		activeCe = candidates[i].ce;
+		activeCsn = candidates[i].csn;
+		return true;
+	}
+
+	radio = nullptr;
+	return false;
 }
 
-void updateRadioScanner()
+uint8_t radioCePin() { return activeCe; }
+uint8_t radioCsnPin() { return activeCsn; }
+bool radioIsReady() { return radio != nullptr; }
+
+void radioPrintDetails()
 {
-	if (radio.available())
+	if (!radio)
 	{
-		byte data[18] = {0};
+		Serial.println(F("no radio detected"));
+		return;
+	}
+	radio->printPrettyDetails();
+}
 
-		radio.read(&data, sizeof(data));
+// --- mode configuration ----------------------------------------------------
 
-		// Byte 13 contains the command:
-		// 0x20 on/off
-		// 0x40 color temperature + (more blue)
-		// 0x7F color temperature - (more red)
-		// 0x80 brightness +
-		// 0xBF brightness -
+static void radioApplyBase()
+{
+	radio->setAddressWidth(LB_ADDRESS_WIDTH);
+	radio->setDataRate(RF24_2MBPS); // the light bar runs at 2 Mbps
+	radio->setPALevel(sPaLevel);    // close range is plenty by default
+	radio->setChannel(LB_CHANNEL);
+	radio->disableCRC();        // the bar's own CRC16 lives inside the payload
+	radio->disableDynamicPayloads();
+	radio->setAutoAck(false);   // nothing on the other end speaks nRF24
+	radio->setRetries(0, 0);
+}
 
-		if (data[0] == 0x67 && data[1] == 0x22) // Capture all events from the remote
+void radioTxSetup()
+{
+	if (!radio)
+	{
+		return;
+	}
+	radio->stopListening();
+	radioApplyBase();
+	radio->setPayloadSize(LB_PAYLOAD_SIZE);
+	radio->openWritingPipe((const uint8_t *)LB_TX_ADDR);
+	radio->stopListening();
+}
+
+void radioRxSetup()
+{
+	if (!radio)
+	{
+		return;
+	}
+	radio->stopListening();
+	radioApplyBase();
+	radio->setPayloadSize(LB_SCAN_PAYLOAD);
+	radio->openReadingPipe(1, (const uint8_t *)LB_RX_ADDR);
+	radio->startListening();
+}
+
+// --- baseband --------------------------------------------------------------
+
+uint16_t crc16(const uint8_t *data, uint8_t len)
+{
+	uint16_t crc = 0xFFFE;
+	for (uint8_t i = 0; i < len; i++)
+	{
+		crc ^= (uint16_t)data[i] << 8;
+		for (uint8_t bit = 0; bit < 8; bit++)
 		{
-			Serial.println("=========================");
-			Serial.println("Light Bar Packet received");
-			Serial.println("=========================");
+			crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+								 : (uint16_t)(crc << 1);
+		}
+	}
+	return crc;
+}
 
-			for (unsigned long i = 0; i < sizeof(data); i++)
+void lbBuildPacket(uint8_t *out, uint32_t remoteId, uint16_t command, uint8_t counter)
+{
+	memcpy(out, LB_PREAMBLE, 8);
+	out[8] = (remoteId >> 16) & 0xFF;
+	out[9] = (remoteId >> 8) & 0xFF;
+	out[10] = remoteId & 0xFF;
+	out[11] = 0xFF; // separator
+	out[12] = counter;
+	out[13] = (command >> 8) & 0xFF;
+	out[14] = command & 0xFF;
+
+	uint16_t crc = crc16(out, 15);
+	out[15] = (crc >> 8) & 0xFF;
+	out[16] = crc & 0xFF;
+}
+
+// Bit `p` (0 = least significant) of a big-endian byte array.
+static uint8_t bitAt(const uint8_t *raw, uint8_t nbytes, uint8_t p)
+{
+	uint8_t idx = (uint8_t)(nbytes - 1 - (p >> 3));
+	return (raw[idx] >> (p & 7)) & 1;
+}
+
+// Eight bits starting at `startBit`, most significant first.
+static uint8_t extractByteBE(const uint8_t *raw, uint8_t nbytes, uint8_t startBit)
+{
+	uint8_t v = 0;
+	for (uint8_t i = 0; i < 8; i++)
+	{
+		v = (uint8_t)((v << 1) | bitAt(raw, nbytes, startBit + 7 - i));
+	}
+	return v;
+}
+
+bool lbDecodeRaw(const uint8_t *raw12, uint8_t *out9)
+{
+	// The nRF24 payload is bit-shifted relative to the Telink fields: the nine
+	// meaningful bytes are bits [9, 81) of the 96-bit big-endian value.
+	for (uint8_t j = 0; j < 9; j++)
+	{
+		out9[j] = extractByteBE(raw12, LB_SCAN_PAYLOAD, (uint8_t)(9 + (8 - j) * 8));
+	}
+
+	uint8_t buf[15];
+	memcpy(buf, LB_PREAMBLE, 8);
+	memcpy(buf + 8, out9, 7); // id(3) + separator + counter + command(2)
+
+	uint16_t expected = crc16(buf, 15);
+	uint16_t actual = ((uint16_t)out9[7] << 8) | out9[8];
+	return expected == actual;
+}
+
+// --- transmit --------------------------------------------------------------
+
+void lbSetRepeats(uint8_t repeats)
+{
+	if (repeats >= 1)
+	{
+		sRepeats = repeats;
+	}
+}
+
+uint8_t lbRepeats() { return sRepeats; }
+uint8_t lbChannelCount() { return sAllChannels ? 4 : 1; }
+
+void lbSetAllChannels(bool on) { sAllChannels = on; }
+
+void lbSetPaLevel(uint8_t level)
+{
+	sPaLevel = (level > 3) ? 3 : level;
+	if (radio)
+	{
+		radio->setPALevel(sPaLevel);
+	}
+}
+
+uint8_t lbPaLevel() { return sPaLevel; }
+
+// Reports how many radio writes reported a completed transmission. A healthy
+// nRF24 with auto-ack off sets TX_DS for every packet it puts on the air, so a
+// full count only proves the SPI/radio side is alive, not that the light bar
+// heard anything.
+uint16_t lbSend(uint32_t remoteId, uint16_t command, uint8_t counter)
+{
+	if (!radio)
+	{
+		return 0;
+	}
+
+	uint8_t pkt[LB_PAYLOAD_SIZE];
+	lbBuildPacket(pkt, remoteId, command, counter);
+
+	uint8_t channels = sAllChannels ? 4 : 1;
+	uint16_t ok = 0;
+
+	radio->stopListening();
+	radio->setPayloadSize(LB_PAYLOAD_SIZE);
+	radio->openWritingPipe((const uint8_t *)LB_TX_ADDR);
+
+	for (uint8_t c = 0; c < channels; c++)
+	{
+		radio->setChannel(LB_CHANNELS[c]);
+		for (uint8_t r = 0; r < sRepeats; r++)
+		{
+			if (radio->write(pkt, LB_PAYLOAD_SIZE))
 			{
-				if (i == 0)
-					Serial.println("------ address");
-				if (i == 7)
-					Serial.println("------ product serial");
-				if (i == 11)
-					Serial.println("------ packet ID counter, I think. Avoids duplicate execution");
-				if (i == 13)
-					Serial.println("------ action");
-				if (i == 14)
-					Serial.println("------ checksum? parameters? noise? idk");
-				Serial.print(i, DEC);
-				Serial.print(": 0x");
-				Serial.print(data[i], HEX);
-				if (i == 13 && data[i] == 0x80)
-					Serial.print(" | brightness +");
-				if (i == 13 && data[i] == 0xBF)
-					Serial.print(" | brightness -");
-				if (i == 13 && data[i] == 0x20)
-					Serial.print(" | on/off");
-				if (i == 13 && data[i] == 0x7F)
-					Serial.print(" | temperature - ");
-				if (i == 13 && data[i] == 0x40)
-					Serial.print(" | temperature + ");
-				Serial.println();
+				ok++;
 			}
-
-			Serial.println("=========================");
-			Serial.println();
+			delay(10);
 		}
 	}
-};
 
-void setupRadioTransmitter()
-{
-
-	radio.begin();
-	radio.openReadingPipe(0, address);
-
-	Serial.println("Set to channel 68...");
-	radio.setChannel(68);
-
-	Serial.println("Set data rate to 2MBPS...");
-	radio.setDataRate(RF24_2MBPS);
-
-	Serial.println("Disable CRC...");
-	radio.disableCRC();
-
-	Serial.println("Disable dynamic payloads...");
-	radio.disableDynamicPayloads();
-
-	Serial.println("Disable auto-ACK...");
-	radio.setAutoAck(false);
-
-	Serial.println("Set PA Level LOW...");
-	radio.setPALevel(RF24_PA_LOW);
-
-	Serial.println("Set payload size");
-	radio.setPayloadSize(17);
-
-	Serial.println("Set retries");
-	radio.setRetries(15, 15);
-
-	Serial.println("Open writing pipe");
-	radio.openWritingPipe(address); // always uses pipe 0
-
-	radio.printPrettyDetails();
-
-	Serial.println("Stop listening");
-	radio.stopListening();
+	radio->setChannel(LB_CHANNEL);
+	return ok;
 }
 
-void sendCommand()
+// --- receive ---------------------------------------------------------------
+
+bool radioScanPoll(uint8_t *raw12)
 {
-	// Captured sequences from remote
-	uint8_t commands[5][17] = {
-		{0x67,
-		 0x22,
-		 0x9B,
-		 0xA3,
-		 0x89,
-		 0x26,
-		 0x82,
-		 0x4A,
-		 0x2D,
-		 0xE4,
-		 0x3F,
-		 0xED,
-		 0xA0,
-		 0x20,
-		 0x1B,
-		 0xE5,
-		 0x12},
-		{0x67,
-		 0x22,
-		 0x9B,
-		 0xA3,
-		 0x89,
-		 0x26,
-		 0x82,
-		 0x4A,
-		 0x2D,
-		 0xE4,
-		 0x3F,
-		 0xF0,
-		 0x40,
-		 0x20,
-		 0xA,
-		 0x65,
-		 0x13},
-		{0x67,
-		 0x22,
-		 0x9B,
-		 0xA3,
-		 0x89,
-		 0x26,
-		 0x82,
-		 0x4A,
-		 0x2D,
-		 0xE4,
-		 0x3F,
-		 0xEE,
-		 0x0,
-		 0x20,
-		 0x39,
-		 0xC7,
-		 0x66},
-		{0x67,
-		 0x22,
-		 0x9B,
-		 0xA3,
-		 0x89,
-		 0x26,
-		 0x82,
-		 0x4A,
-		 0x2D,
-		 0xE4,
-		 0x3F,
-		 0xF5,
-		 0x40,
-		 0x20,
-		 0xF,
-		 0x89,
-		 0xE3},
-		{0x67,
-		 0x22,
-		 0x9B,
-		 0xA3,
-		 0x89,
-		 0x26,
-		 0x82,
-		 0x4A,
-		 0x2D,
-		 0xE4,
-		 0x3F,
-		 0xF7,
-		 0x40,
-		 0x20,
-		 0x7,
-		 0xE5,
-		 0x93}};
-
-	counter++;
-
-	// Send repeatedly, response is unreliable otherwise
-	for (int i = 0; i < 17; i++)
+	if (!radio || !radio->available())
 	{
-		bool report = radio.write(&commands[counter % 5], sizeof(commands[0]), true);
-
-		if (!report)
-		{
-			Serial.println("write fail...");
-		}
-
-		// Without the delay, it'll work some times and not others
-		delay(20);
+		return false;
 	}
+	radio->read(raw12, LB_SCAN_PAYLOAD);
+	return true;
 }
