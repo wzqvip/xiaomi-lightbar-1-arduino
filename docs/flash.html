@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>刷固件 · 小米显示器挂灯控制器</title>
+<style>
+  :root {
+    --bg: #14161a; --card: #1d2026; --line: #2c313a; --fg: #e6e9ef;
+    --dim: #9aa3b2; --accent: #4f8cff; --ok: #37c07a; --warn: #e8a33d; --bad: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 19px; margin: 0; flex: 1; font-weight: 600; }
+  a { color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; margin: 0 0 12px; color: var(--dim); font-weight: 600; }
+  button {
+    background: #262b33; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 9px; padding: 11px 16px; font-size: 14px; cursor: pointer; font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: #313742; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #3d7cf0; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 4px 12px; font-size: 13px; margin-bottom: 10px; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+  .bar { height: 12px; background: #0e1013; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; margin: 14px 0 8px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  .status { font-size: 13px; color: var(--dim); min-height: 20px; }
+  pre#log {
+    background: #0e1013; border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    height: 240px; overflow-y: auto; margin: 12px 0 0;
+    font: 12px/1.5 ui-monospace, Consolas, monospace; color: #b9c2d0;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .note { font-size: 13px; color: var(--dim); }
+  .note strong { color: var(--warn); }
+  .banner { padding: 12px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13.5px; }
+  .banner.warn { background: #3a2a12; border: 1px solid #6b4d1d; color: #ffd591; }
+  .banner.bad { background: #3a1616; border: 1px solid #6b2424; color: #ffb3b3; }
+  input[type=file] { font-size: 13px; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>刷固件 <span style="color:var(--dim);font-weight:400">RF-Nano · ATmega328P</span></h1>
+    <a href="./index.html">← 回到控制台</a>
+  </header>
+
+  <div class="banner bad" id="unsupported" hidden></div>
+
+  <div class="banner warn">
+    <strong>开始之前：</strong>请先在<a href="./index.html">控制台</a>点「断开」。
+    串口是独占的，两边同时开着一个都连不上。
+  </div>
+
+  <section class="card">
+    <h2>1. 固件</h2>
+    <dl class="kv" id="fwInfo">
+      <dt>来源</dt><dd id="fwSource">读取中…</dd>
+      <dt>大小</dt><dd id="fwSize">–</dd>
+      <dt>SHA-256</dt><dd id="fwSha">–</dd>
+    </dl>
+    <div class="row">
+      <input type="file" id="file" accept=".hex,text/plain">
+      <span class="note">或者选一个本地 .hex 文件</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>2. 烧录</h2>
+    <div class="row">
+      <button id="flashBtn" class="primary" disabled>选择串口并烧录</button>
+      <button id="reloadBtn">重新读取内置固件</button>
+    </div>
+    <div class="bar"><div id="bar"></div></div>
+    <div class="status" id="status">等待开始</div>
+    <pre id="log"></pre>
+    <div class="note" style="margin-top:10px">
+      烧录过程中<strong>不要拔线</strong>。万一中途失败，板子只是程序不完整，
+      重新插拔 USB 再刷一次就行 —— bootloader 在受保护区域，刷不坏。
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>说明</h2>
+    <div class="note">
+      这个页面用 Web Serial 直接对 Arduino 的 optiboot 讲 STK500 协议，
+      写入后还会逐页回读校验。和 <code>pio run -t upload</code> 做的事一样，只是不需要装工具链。<br><br>
+      需要桌面版 <b>Chrome / Edge / Opera</b>，以及 HTTPS 或 localhost（<code>file://</code> 也算安全上下文）。<br>
+      <b>如果是直接双击本文件打开的</b>：浏览器会禁止 <code>fetch</code> 本地文件，
+      所以读不到内置固件 —— 这时候手动选一个 <code>.hex</code> 就行
+      （自己编译的在 <code>.pio/build/nanoatmega328/firmware.hex</code>）。
+      部署到 GitHub Pages 或走 localhost 就能自动加载。
+    </div>
+  </section>
+
+</div>
+
+<script src="./flasher.js"></script>
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const BAUD = 115200;
+
+let firmware = null; // { text, name, sha }
+
+function log(msg) {
+  const el = $("log");
+  el.textContent += msg + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(text, kind) {
+  const el = $("status");
+  el.textContent = text;
+  el.style.color = kind === "bad" ? "var(--bad)" : kind === "ok" ? "var(--ok)" : "var(--dim)";
+}
+
+function setProgress(fraction) {
+  $("bar").style.width = Math.round(fraction * 100) + "%";
+}
+
+async function sha256Hex(text) {
+  if (!crypto.subtle) return "(需要 HTTPS 才能算哈希)";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function loadBuiltin() {
+  setStatus("正在读取内置固件…");
+  try {
+    const res = await fetch("./firmware.hex", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const text = await res.text();
+    const parsed = LightbarFlasher.parseIntelHex(text);
+
+    let built = "";
+    try {
+      const man = await (await fetch("./firmware.json", { cache: "no-store" })).json();
+      built = [man.commit && "commit " + String(man.commit).slice(0, 7),
+               man.built && man.built].filter(Boolean).join(" · ");
+    } catch (e) { /* manifest is optional */ }
+
+    const sha = await sha256Hex(text);
+    firmware = { text, name: "内置 firmware.hex", sha };
+    $("fwSource").textContent = "内置 firmware.hex" + (built ? "（" + built + "）" : "");
+    $("fwSize").textContent = parsed.bytes.length + " 字节程序（" + parsed.records + " 条记录）";
+    $("fwSha").textContent = sha;
+    $("flashBtn").disabled = false;
+    setStatus("固件已就绪，可以烧录", "ok");
+    log("已加载内置固件：" + parsed.bytes.length + " 字节");
+  } catch (err) {
+    $("fwSource").textContent = "没有找到内置固件";
+    $("fwSize").textContent = "–";
+    $("fwSha").textContent = "–";
+    setStatus("请手动选择一个 .hex 文件", "bad");
+    log("读取内置固件失败：" + err.message);
+    log("（自己 build 的话，文件在 .pio/build/nanoatmega328/firmware.hex）");
+  }
+}
+
+async function useLocalFile(file) {
+  try {
+    const text = await file.text();
+    const parsed = LightbarFlasher.parseIntelHex(text);
+    firmware = { text, name: file.name, sha: await sha256Hex(text) };
+    $("fwSource").textContent = file.name;
+    $("fwSize").textContent = parsed.bytes.length + " 字节程序（" + parsed.records + " 条记录）";
+    $("fwSha").textContent = firmware.sha;
+    $("flashBtn").disabled = false;
+    setStatus("固件已就绪，可以烧录", "ok");
+    log("已加载 " + file.name + "：" + parsed.bytes.length + " 字节");
+  } catch (err) {
+    firmware = null;
+    $("flashBtn").disabled = true;
+    setStatus("这个文件不是合法的 Intel HEX", "bad");
+    log("解析失败：" + err.message);
+  }
+}
+
+async function flashNow() {
+  if (!firmware) return;
+  $("flashBtn").disabled = true;
+  setProgress(0);
+  log("");
+  log("=== 开始烧录 " + firmware.name + " ===");
+
+  let port = null, serialReader = null, writer = null;
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: BAUD, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" });
+    log("串口已打开，等待 bootloader…");
+
+    const reader = new LightbarFlasher.ByteReader();
+    serialReader = port.readable.getReader();
+    (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await serialReader.read();
+          if (done) break;
+          if (value) reader.push(value);
+        }
+      } catch (e) { /* cancelled on close */ }
+    })();
+
+    writer = port.writable.getWriter();
+    const result = await LightbarFlasher.flash({
+      write: (bytes) => writer.write(bytes),
+      reader,
+      hex: firmware.text,
+      onLog: log,
+      onProgress: (fraction, label) => { setProgress(fraction); setStatus(label); },
+    });
+
+    setProgress(1);
+    setStatus("烧录成功，已写入并校验 " + result.pages + " 页 ✓", "ok");
+    log("=== 完成 ===");
+  } catch (err) {
+    setStatus("失败：" + err.message, "bad");
+    log("!!! " + err.message);
+    log("重新插拔 USB，然后再点一次烧录。");
+  } finally {
+    try { if (serialReader) await serialReader.cancel(); } catch (e) {}
+    try { if (serialReader) serialReader.releaseLock(); } catch (e) {}
+    try { if (writer) writer.releaseLock(); } catch (e) {}
+    try { if (port) await port.close(); } catch (e) {}
+    $("flashBtn").disabled = !firmware;
+  }
+}
+
+function init() {
+  if (!("serial" in navigator)) {
+    $("unsupported").hidden = false;
+    $("unsupported").innerHTML =
+      "这个浏览器不支持 Web Serial。请用桌面版 <b>Chrome / Edge / Opera</b>，" +
+      "并且页面必须是 <b>HTTPS</b> 或 <b>http://localhost</b>。";
+    $("flashBtn").disabled = true;
+  }
+  $("flashBtn").onclick = flashNow;
+  $("reloadBtn").onclick = loadBuiltin;
+  $("file").onchange = (e) => { if (e.target.files[0]) useLocalFile(e.target.files[0]); };
+  loadBuiltin();
+}
+
+init();
+</script>
+</body>
+</html>

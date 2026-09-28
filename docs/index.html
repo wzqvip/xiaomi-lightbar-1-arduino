@@ -79,6 +79,7 @@
     padding: 12px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13.5px;
   }
   code { background: #0e1013; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+  a { color: var(--accent); font-size: 13.5px; }
 </style>
 </head>
 <body>
@@ -87,6 +88,7 @@
   <header>
     <h1>小米显示器挂灯控制器 <span style="color:var(--dim);font-weight:400">MJGJD01YL</span></h1>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">未连接</span></div>
+    <a href="./flash.html">刷固件 →</a>
     <button id="connectBtn" class="primary">连接</button>
   </header>
 
@@ -107,7 +109,7 @@
 
     <section class="card">
       <h2>亮度</h2>
-      <div class="lbl"><span>暗</span><span id="brightVal">–</span><span>亮</span></div>
+      <div class="lbl"><span>暗 0 lm</span><span id="brightVal">–</span><span>亮 270 lm</span></div>
       <input type="range" id="bright" min="0" max="15" value="8" disabled>
       <div class="row">
         <button id="upBtn" disabled>调亮</button>
@@ -117,11 +119,24 @@
 
     <section class="card">
       <h2>色温</h2>
-      <div class="lbl"><span>暖</span><span id="tempVal">–</span><span>冷</span></div>
+      <div class="lbl"><span>暖 2700 K</span><span id="tempVal">–</span><span>冷 6500 K</span></div>
       <input type="range" id="temp" min="0" max="15" value="8" disabled>
       <div class="row">
         <button id="coolBtn" disabled>变冷</button>
         <button id="warmBtn" disabled>变暖</button>
+      </div>
+      <div class="field" style="margin:12px 0 0">
+        <label for="cctModel">换算模型</label>
+        <select id="cctModel" disabled>
+          <option value="mix" selected>线性 mired（物理混合模型）</option>
+          <option value="kelvin">线性 Kelvin（lamperez HA）</option>
+          <option value="lamperez">分段 mired（lamperez MQTT）</option>
+        </select>
+      </div>
+      <div class="field" style="margin:10px 0 0">
+        <label for="kelvinIn">跳到 K</label>
+        <input type="number" id="kelvinIn" min="2700" max="6500" step="50" value="4000" style="width:100px">
+        <button id="gotoKelvinBtn" disabled>定位档位</button>
       </div>
     </section>
   </div>
@@ -192,6 +207,57 @@ let readyWaiters = [];
 let connected = false;
 let scanIds = new Map();
 
+// --- scales -----------------------------------------------------------------
+// Official endpoints for the MJGJD01YL: 270 lm, 2700-6500 K, Ra95.
+// The endpoints are documented; the spacing of the 15 interior steps is not,
+// so all three open-source models are offered. See tools/scales.py.
+
+const STEPS = 15;
+const MAX_LUMENS = 270;
+const MIN_KELVIN = 2700, MAX_KELVIN = 6500;
+const MIRED_COOL = 153, MIRED_WARM = 370; // rounded 6500 K / 2700 K
+
+function stepToMired(step, model) {
+  if (model === "kelvin") {
+    return 1e6 / (MIN_KELVIN + (MAX_KELVIN - MIN_KELVIN) * step / STEPS);
+  }
+  if (model === "lamperez") {
+    return step >= 7 ? 153 + (15 - step) * 66 / 8
+                     : 219 + (7 - step) * 151 / 7;
+  }
+  return MIRED_WARM + (MIRED_COOL - MIRED_WARM) * step / STEPS;
+}
+
+function stepToKelvin(step, model) { return 1e6 / stepToMired(step, model); }
+
+function kelvinToStep(kelvin, model) {
+  let best = 0, bestErr = Infinity;
+  for (let s = 0; s <= STEPS; s++) {
+    const err = Math.abs(stepToKelvin(s, model) - kelvin);
+    if (err < bestErr) { best = s; bestErr = err; }
+  }
+  return best;
+}
+
+function stepToLumens(step) { return step / STEPS * MAX_LUMENS; }
+function stepToPercent(step) { return step / STEPS * 100; }
+
+/** Tanner Helland's Kelvin -> sRGB approximation. */
+function kelvinToRgb(kelvin) {
+  const t = kelvin / 100;
+  const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  const r = t <= 66 ? 255 : 329.698727446 * Math.pow(t - 60, -0.1332047592);
+  const g = t <= 66 ? 99.4708025861 * Math.log(t) - 161.1195681661
+                    : 288.1221695283 * Math.pow(t - 60, -0.0755148492);
+  let b;
+  if (t >= 66) b = 255;
+  else if (t <= 19) b = 0;
+  else b = 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  return [clamp(r), clamp(g), clamp(b)];
+}
+
+function currentModel() { return $("cctModel").value || "mix"; }
+
 // ---------------------------------------------------------------- logging
 
 function log(text, cls) {
@@ -253,6 +319,7 @@ async function disconnect() {
   readyWaiters = [];
   $("connectBtn").textContent = "连接";
   setStatus("未连接", "");
+  updatePreview();
   log("已断开");
 }
 
@@ -359,26 +426,32 @@ async function applyRadioSettings(quiet) {
 
 function setControlsEnabled(on) {
   ["toggleBtn", "resetBtn", "bright", "upBtn", "downBtn", "temp", "coolBtn", "warmBtn",
-   "applyIdBtn", "scanBtn", "pairBtn", "pa", "applyRadioBtn", "rawBtn", "infoBtn"]
+   "applyIdBtn", "scanBtn", "pairBtn", "pa", "applyRadioBtn", "rawBtn", "infoBtn",
+   "cctModel", "kelvinIn", "gotoKelvinBtn"]
     .forEach((id) => { $(id).disabled = !on; });
-  if (!on) { $("brightVal").textContent = "–"; $("tempVal").textContent = "–"; }
 }
 
 function updatePreview() {
   const b = parseInt($("bright").value, 10);
   const t = parseInt($("temp").value, 10);
-  if ($("bright").disabled) { $("preview").style.background = "#0e1013"; return; }
-  $("brightVal").textContent = b;
-  $("tempVal").textContent = t;
-  // 2700K (warm) -> 6500K (cool)
-  const warm = [255, 176, 96], cool = [201, 226, 255];
-  const mix = (a, c, k) => Math.round(a + (c - a) * k);
-  const k = t / 15;
-  const rgb = [mix(warm[0], cool[0], k), mix(warm[1], cool[1], k), mix(warm[2], cool[2], k)];
-  const scale = 0.28 + 0.72 * (b / 15);
+  const model = currentModel();
+  const kelvin = stepToKelvin(t, model);
+  const mired = 1e6 / kelvin;
+
+  $("brightVal").textContent =
+    b + " · " + Math.round(stepToPercent(b)) + "% · " + Math.round(stepToLumens(b)) + " lm";
+  $("tempVal").textContent =
+    t + " · " + Math.round(kelvin) + " K · " + Math.round(mired) + " mired";
+
+  const rgb = kelvinToRgb(kelvin);
+  // Gamma-encode the drive level: light output is linear in lumens, but an
+  // sRGB preview of it is not, otherwise mid steps look far too dark.
+  const scale = Math.pow(b / STEPS, 1 / 2.2);
   const col = rgb.map((v) => Math.round(v * scale));
-  $("preview").style.background = "rgb(" + col.join(",") + ")";
-  $("preview").style.boxShadow = "0 0 " + (6 + 26 * (b / 15)) + "px rgba(" + rgb.join(",") + ",.55)";
+  const p = $("preview");
+  p.style.background = "rgb(" + col.join(",") + ")";
+  p.style.boxShadow = "0 0 " + (6 + 26 * (b / STEPS)) + "px rgba(" + rgb.join(",") + ",.55)";
+  p.style.opacity = connected ? "1" : ".45";
 }
 
 function bindUI() {
@@ -396,6 +469,20 @@ function bindUI() {
   $("temp").oninput = updatePreview;
   $("bright").onchange = () => { updatePreview(); queueCommand("b " + $("bright").value, { timeout: 20000 }); };
   $("temp").onchange = () => { updatePreview(); queueCommand("t " + $("temp").value, { timeout: 20000 }); };
+
+  $("cctModel").onchange = () => { save("cctModel", currentModel()); updatePreview(); };
+
+  $("gotoKelvinBtn").onclick = () => {
+    const kelvin = parseInt($("kelvinIn").value, 10);
+    if (!kelvin) return;
+    const model = currentModel();
+    const step = kelvinToStep(kelvin, model);
+    $("temp").value = step;
+    updatePreview();
+    log(kelvin + " K -> 档位 " + step + "（该模型下实际 " +
+        Math.round(stepToKelvin(step, model)) + " K）", "ok");
+    queueCommand("t " + step, { timeout: 20000 });
+  };
 
   $("applyIdBtn").onclick = () => {
     const id = normalizeId($("remoteId").value);
@@ -500,6 +587,7 @@ function init() {
   $("pa").value = store("pa", "3");
   $("repeats").value = store("repeats", "20");
   $("allChannels").checked = store("allChannels", "1") === "1";
+  $("cctModel").value = store("cctModel", "mix");
   bindUI();
   updatePreview();
 }

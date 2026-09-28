@@ -18,6 +18,7 @@ const EXPORT = `
 ;globalThis.__gui = {
   connect, disconnect, queueCommand, onText, startPairing, stopPairing,
   scanIds, isConnected: () => connected, lineBuf: () => lineBuf,
+  stepToKelvin, stepToMired, kelvinToStep, stepToLumens, stepToPercent, kelvinToRgb,
 };`;
 
 // ---------------------------------------------------------------- DOM stub
@@ -201,6 +202,30 @@ async function main() {
   check("status back to 未连接", els.statusText.textContent === "未连接",
         JSON.stringify(els.statusText.textContent));
   check("controls disabled again", els.toggleBtn.disabled === true);
+
+  // ---- scenario 7: the JS scale tables match tools/scales.py --------------
+  // Generate the expectation first with:
+  //   python tools/scales.py --json > .pio-core/scales.json
+  console.log("\n[7] scale tables match the Python reference");
+  const refPath = path.join(__dirname, "..", ".pio-core", "scales.json");
+  if (!fs.existsSync(refPath)) {
+    console.log("  SKIP  " + refPath + " not found");
+  } else {
+    const ref = JSON.parse(fs.readFileSync(refPath, "utf8"));
+    const close = (a, b) => Math.abs(a - b) < 0.01;
+    const bad = [];
+    for (const row of ref) {
+      const s = row.step;
+      if (!close(gui.stepToKelvin(s, "mix"), row.mix_k)) bad.push(`mix K step ${s}`);
+      if (!close(gui.stepToMired(s, "mix"), row.mix_mired)) bad.push(`mix mired step ${s}`);
+      if (!close(gui.stepToKelvin(s, "kelvin"), row.kelvin_k)) bad.push(`kelvin K step ${s}`);
+      if (!close(gui.stepToKelvin(s, "lamperez"), row.lamperez_k)) bad.push(`lamperez K step ${s}`);
+      if (!close(gui.stepToLumens(s), row.lumens)) bad.push(`lumens step ${s}`);
+      if (!close(gui.stepToPercent(s), row.percent)) bad.push(`percent step ${s}`);
+      if (gui.kelvinToStep(row.mix_k, "mix") !== s) bad.push(`roundtrip step ${s}`);
+    }
+    check("all 3 models x 16 steps agree", bad.length === 0, bad.slice(0, 6).join(", "));
+  }
 
   const failed = results.filter((r) => !r.ok);
   console.log("\n" + (results.length - failed.length) + "/" + results.length + " checks passed");

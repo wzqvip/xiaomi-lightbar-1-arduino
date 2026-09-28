@@ -1,0 +1,134 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # attach firmware to releases
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run
+
+      # --- host side tests -------------------------------------------------
+      # These do not need hardware: the scale tables are pure maths and the
+      # GUI test drives the sketch protocol through a mock serial port.
+
+      - name: Scale table self-check
+        run: |
+          python -c "import sys; sys.path.insert(0,'tools'); import scales; \
+          assert round(scales.step_to_kelvin(0,'mix')) == 2703; \
+          assert round(scales.step_to_kelvin(15,'mix')) == 6536; \
+          assert round(scales.step_to_lumens(15)) == 270; \
+          print('scale endpoints ok')"
+
+      - name: Web GUI test (mock firmware)
+        run: |
+          mkdir -p .pio-core
+          python tools/scales.py --json > .pio-core/scales.json
+          node tools/gui_test.js
+
+      - name: Intel HEX parser check
+        run: |
+          node -e "
+          const f = require('./docs/flasher.js');
+          const fs = require('fs');
+          const r = f.parseIntelHex(fs.readFileSync('.pio/build/nanoatmega328/firmware.hex','utf8'));
+          if (r.bytes.length < 1000) throw new Error('suspiciously small image');
+          if (f.padToPage(r.bytes,128).length % 128) throw new Error('padding failed');
+          console.log('hex parse ok:', r.bytes.length, 'bytes,', r.records, 'records');
+          "
+
+      # --- artifacts -------------------------------------------------------
+
+      - name: Rename firmware for humans
+        run: |
+          cp .pio/build/nanoatmega328/firmware.hex \
+             xiaomi-lightbar-rf-nano.hex
+          cp .pio/build/nanoatmega328/firmware.elf \
+             xiaomi-lightbar-rf-nano.elf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            xiaomi-lightbar-rf-nano.hex
+            xiaomi-lightbar-rf-nano.elf
+
+      - name: Assemble Pages site
+        run: |
+          mkdir -p _site
+          cp -r docs/. _site/
+          cp .pio/build/nanoatmega328/firmware.hex _site/firmware.hex
+          python - <<'PY'
+          import datetime, hashlib, json, os, pathlib
+          raw = pathlib.Path(".pio/build/nanoatmega328/firmware.hex").read_bytes()
+          manifest = {
+              "commit": os.environ.get("GITHUB_SHA", ""),
+              "ref": os.environ.get("GITHUB_REF_NAME", ""),
+              "built": datetime.datetime.now(datetime.timezone.utc)
+                                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "bytes": len(raw),
+              "sha256": hashlib.sha256(raw).hexdigest(),
+          }
+          pathlib.Path("_site/firmware.json").write_text(
+              json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          print(manifest)
+          PY
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Attach firmware to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            xiaomi-lightbar-rf-nano.hex
+            xiaomi-lightbar-rf-nano.elf
+
+  deploy:
+    # Only publish Pages from the default branch or a tag, never from a PR.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

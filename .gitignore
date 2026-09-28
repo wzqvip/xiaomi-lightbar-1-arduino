@@ -6,3 +6,10 @@
 
 .vscode
 /.pio-core
+__pycache__/
+*.pyc
+
+# CI drops these next to docs/ when publishing Pages; a local copy lets
+# docs/flash.html be tested offline. They are build output, never committed.
+/docs/firmware.hex
+/docs/firmware.json
