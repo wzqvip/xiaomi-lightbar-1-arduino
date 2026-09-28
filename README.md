@@ -1,5 +1,7 @@
 # xiaomi-lightbar
 
+[![verified on real hardware](https://img.shields.io/badge/verified-on%20real%20hardware-brightgreen)](#verified)
+
 用一块 **RF-Nano**（板载 nRF24L01+ 的 Arduino Nano）控制 **小米显示器挂灯 MJGJD01YL**。
 
 这是 [benallen-dev/xiaomi-lightbar](https://github.com/benallen-dev/xiaomi-lightbar) 的 fork。
@@ -7,7 +9,20 @@
 不可能工作。这里改成了按照 [lamperez 的逆向工程](https://github.com/lamperez/xiaomi-lightbar-nrf24)
 **在单片机上实时构造合法报文**（含 CRC16），所以可以控制任意一台 MJGJD01YL。
 
-本仓库的固件已在真实硬件上验证通过：开/关、色温、亮度均可用。
+## Verified
+
+✅ **已在真实硬件上端到端验证** —— 灯条对每一条指令都有反应。
+
+| | |
+| :--- | :--- |
+| **主控** | RF-Nano V1.0 廉价复刻版（ATmega328P + CH340G），`CE=D10` / `CSN=D9` |
+| **灯条** | 小米显示器挂灯 **MJGJD01YL**（非蓝牙版） |
+| **实测可用** | 开/关 · 调亮 / 调暗 · 变暖 / 变冷 |
+| **另外验证** | 用任意 ID 配对（断电重上电）· 网页刷固件在真机上写入并逐页回读校验 |
+| **自动化测试** | 网页 GUI 串口逻辑 19/19 · 亮度/色温刻度与 Python 参考实现逐值一致 · Intel HEX 解析 |
+
+> ⚠️ **MJGJD02YL**（1S，蓝牙版）用不了 —— 它没有 2.4 GHz 接收器。
+> 买 nRF24 模块之前先看灯条上的标签。
 
 ---
 
